@@ -170,6 +170,7 @@ struct Engine {
     int HEIGHT = 600; // Window height
     int COMPUTE_WIDTH  = 200;   // Compute resolution width
     int COMPUTE_HEIGHT = 150;  // Compute resolution height
+    bool HAS_COMPUTE = false;   // Will be detected at runtime
     float width = 100000000000.0f; // Width of the viewport in meters
     float height = 75000000000.0f; // Height of the viewport in meters
     
@@ -178,9 +179,18 @@ struct Engine {
             cerr << "GLFW init failed\n";
             exit(EXIT_FAILURE);
         }
+        // macOS supports up to 4.1 core; compute shaders require 4.3+ (not available on macOS)
+        // Request the highest compatible context per platform
+#ifdef __APPLE__
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
+        glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+        glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+#else
         glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
         glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
         glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+#endif
         window = glfwCreateWindow(WIDTH, HEIGHT, "Black Hole", nullptr, nullptr);
         if (!window) {
             cerr << "Failed to create GLFW window\n";
@@ -201,30 +211,39 @@ struct Engine {
         this->shaderProgram = CreateShaderProgram();
         gridShaderProgram = CreateShaderProgram("grid.vert", "grid.frag");
 
-        computeProgram = CreateComputeProgram("geodesic.comp");
-        glGenBuffers(1, &cameraUBO);
-        glBindBuffer(GL_UNIFORM_BUFFER, cameraUBO);
-        glBufferData(GL_UNIFORM_BUFFER, 128, nullptr, GL_DYNAMIC_DRAW); // alloc ~128 bytes
-        glBindBufferBase(GL_UNIFORM_BUFFER, 1, cameraUBO); // binding = 1 matches shader
+        // Detect compute shader support (OpenGL 4.3 or ARB_compute_shader)
+#ifdef __APPLE__
+        HAS_COMPUTE = false;
+#else
+        HAS_COMPUTE = (GLEW_VERSION_4_3 || GLEW_ARB_compute_shader);
+#endif
 
-        glGenBuffers(1, &diskUBO);
-        glBindBuffer(GL_UNIFORM_BUFFER, diskUBO);
-        glBufferData(GL_UNIFORM_BUFFER, sizeof(float) * 4, nullptr, GL_DYNAMIC_DRAW); // 3 values + 1 padding
-        glBindBufferBase(GL_UNIFORM_BUFFER, 2, diskUBO); // binding = 2 matches compute shader
+        if (HAS_COMPUTE) {
+            computeProgram = CreateComputeProgram("geodesic.comp");
+            glGenBuffers(1, &cameraUBO);
+            glBindBuffer(GL_UNIFORM_BUFFER, cameraUBO);
+            glBufferData(GL_UNIFORM_BUFFER, 128, nullptr, GL_DYNAMIC_DRAW); // alloc ~128 bytes
+            glBindBufferBase(GL_UNIFORM_BUFFER, 1, cameraUBO); // binding = 1 matches shader
 
-        glGenBuffers(1, &objectsUBO);
-        glBindBuffer(GL_UNIFORM_BUFFER, objectsUBO);
-        // allocate space for 16 objects: 
-        // sizeof(int) + padding + 16×(vec4 posRadius + vec4 color)
-        GLsizeiptr objUBOSize = sizeof(int) + 3 * sizeof(float)
-            + 16 * (sizeof(vec4) + sizeof(vec4))
-            + 16 * sizeof(float); // 16 floats for mass
-        glBufferData(GL_UNIFORM_BUFFER, objUBOSize, nullptr, GL_DYNAMIC_DRAW);
-        glBindBufferBase(GL_UNIFORM_BUFFER, 3, objectsUBO);  // binding = 3 matches shader
+            glGenBuffers(1, &diskUBO);
+            glBindBuffer(GL_UNIFORM_BUFFER, diskUBO);
+            glBufferData(GL_UNIFORM_BUFFER, sizeof(float) * 4, nullptr, GL_DYNAMIC_DRAW); // 3 values + 1 padding
+            glBindBufferBase(GL_UNIFORM_BUFFER, 2, diskUBO); // binding = 2 matches compute shader
 
-        auto result = QuadVAO();
-        this->quadVAO = result[0];
-        this->texture = result[1];
+            glGenBuffers(1, &objectsUBO);
+            glBindBuffer(GL_UNIFORM_BUFFER, objectsUBO);
+            // allocate space for 16 objects: 
+            // sizeof(int) + padding + 16×(vec4 posRadius + vec4 color)
+            GLsizeiptr objUBOSize = sizeof(int) + 3 * sizeof(float)
+                + 16 * (sizeof(vec4) + sizeof(vec4))
+                + 16 * sizeof(float); // 16 floats for mass
+            glBufferData(GL_UNIFORM_BUFFER, objUBOSize, nullptr, GL_DYNAMIC_DRAW);
+            glBindBufferBase(GL_UNIFORM_BUFFER, 3, objectsUBO);  // binding = 3 matches shader
+
+            auto result = QuadVAO();
+            this->quadVAO = result[0];
+            this->texture = result[1];
+        }
     }
     void generateGrid(const vector<ObjectData>& objects) {
         const int gridSize = 25;
@@ -367,13 +386,25 @@ struct Engine {
     GLuint CreateShaderProgram(const char* vertPath, const char* fragPath) {
         auto loadShader = [](const char* path, GLenum type) -> GLuint {
             std::ifstream in(path);
+            std::string srcStr;
             if (!in.is_open()) {
-                std::cerr << "Failed to open shader: " << path << "\n";
-                exit(EXIT_FAILURE);
+                // Provide minimal inline fallback if file missing
+                if (type == GL_VERTEX_SHADER) {
+                    srcStr = R"(#version 330 core
+                    layout(location=0) in vec3 aPos;
+                    layout(location=1) in vec3 aColor;
+                    uniform mat4 viewProj;
+                    out vec3 vColor;
+                    void main(){ vColor=aColor; gl_Position = viewProj * vec4(aPos,1.0); }
+                    )";
+                } else {
+                    srcStr = R"(#version 330 core
+                    in vec3 vColor; out vec4 FragColor; void main(){ FragColor=vec4(vColor,1.0); }
+                    )";
+                }
+            } else {
+                std::stringstream ss; ss << in.rdbuf(); srcStr = ss.str();
             }
-            std::stringstream ss;
-            ss << in.rdbuf();
-            std::string srcStr = ss.str();
             const char* src = srcStr.c_str();
 
             GLuint shader = glCreateShader(type);
@@ -654,32 +685,30 @@ int main() {
         double dt    = now - lastTime;   // seconds since last frame
         lastTime     = now;
 
-        // Gravity
-        for (auto& obj : objects) {
-            for (auto& obj2 : objects) {
-                if (&obj == &obj2) continue; // skip self-interaction
-                 float dx  = obj2.posRadius.x - obj.posRadius.x;
-                 float dy = obj2.posRadius.y - obj.posRadius.y;
-                 float dz = obj2.posRadius.z - obj.posRadius.z;
-                 float distance = sqrt(dx * dx + dy * dy + dz * dz);
-                 if (distance > 0) {
-                        vector<double> direction = {dx / distance, dy / distance, dz / distance};
-                        //distance *= 1000;
-                        double Gforce = (G * obj.mass * obj2.mass) / (distance * distance);
-
-                        double acc1 = Gforce / obj.mass;
-                        std::vector<double> acc = {direction[0] * acc1, direction[1] * acc1, direction[2] * acc1};
-                        if (Gravity) {
-                            obj.velocity.x += acc[0];
-                            obj.velocity.y += acc[1];
-                            obj.velocity.z += acc[2];
-
-                            obj.posRadius.x += obj.velocity.x;
-                            obj.posRadius.y += obj.velocity.y;
-                            obj.posRadius.z += obj.velocity.z;
-                            cout << "velocity: " <<obj.velocity.x<<", " <<obj.velocity.y<<", " <<obj.velocity.z<<endl;
-                        }
-                    }
+        // Gravity (O(N^2) naive). Only update when Gravity is enabled.
+        if (Gravity) {
+            const size_t n = objects.size();
+            for (size_t i = 0; i < n; ++i) {
+                vec3 netAccel(0.0f);
+                for (size_t j = 0; j < n; ++j) {
+                    if (i == j) continue;
+                    vec3 delta = vec3(
+                        objects[j].posRadius.x - objects[i].posRadius.x,
+                        objects[j].posRadius.y - objects[i].posRadius.y,
+                        objects[j].posRadius.z - objects[i].posRadius.z
+                    );
+                    float dist = glm::length(delta);
+                    if (dist <= 1e-3f) continue;
+                    vec3 dir = delta / dist;
+                    double forceOverM = (G * objects[j].mass) / double(dist * dist);
+                    netAccel += vec3(dir) * float(forceOverM);
+                }
+                // Semi-implicit Euler with small dt
+                const float dtSim = 0.01f;
+                objects[i].velocity += netAccel * dtSim;
+                objects[i].posRadius.x += objects[i].velocity.x * dtSim;
+                objects[i].posRadius.y += objects[i].velocity.y * dtSim;
+                objects[i].posRadius.z += objects[i].velocity.z * dtSim;
             }
         }
 
@@ -688,16 +717,21 @@ int main() {
         // ---------- GRID ------------- //
         // 2) rebuild grid mesh on CPU
         engine.generateGrid(objects);
-        // 5) overlay the bent grid
+        // 5) overlay the grid
         mat4 view = lookAt(camera.position(), camera.target, vec3(0,1,0));
-        mat4 proj = perspective(radians(60.0f), float(engine.COMPUTE_WIDTH)/engine.COMPUTE_HEIGHT, 1e9f, 1e14f);
+        mat4 proj = perspective(radians(60.0f), float(engine.WIDTH)/engine.HEIGHT, 1e9f, 1e14f);
         mat4 viewProj = proj * view;
         engine.drawGrid(viewProj);
 
-        // ---------- RUN RAYTRACER ------------- //
+        // ---------- RUN RAYTRACER OR FALLBACK ------------- //
         glViewport(0, 0, engine.WIDTH, engine.HEIGHT);
-        engine.dispatchCompute(camera);
-        engine.drawFullScreenQuad();
+        if (engine.HAS_COMPUTE) {
+            engine.dispatchCompute(camera);
+            engine.drawFullScreenQuad();
+        } else {
+            // Fallback: simple draw to show grid only without compute
+            // (compute shaders unsupported on macOS OpenGL)
+        }
 
         // 6) present to screen
         glfwSwapBuffers(engine.window);
