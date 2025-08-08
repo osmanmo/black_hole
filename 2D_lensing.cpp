@@ -5,6 +5,7 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <vector>
 #include <iostream>
+#include <algorithm>
 #define _USE_MATH_DEFINES
 #include <cmath>
 #ifndef M_PI
@@ -53,6 +54,8 @@ struct Engine {
             exit(EXIT_FAILURE);
         }
         glViewport(0, 0, WIDTH, HEIGHT);;
+
+
     }
 
     void run() {
@@ -161,6 +164,79 @@ struct Ray{
 };
 vector<Ray> rays;
 
+// Input callbacks (set in main after GLFW is initialized)
+static void onKey(GLFWwindow* win, int key, int scancode, int action, int mods) {
+    if (action == GLFW_PRESS || action == GLFW_REPEAT) {
+        if (key == GLFW_KEY_ESCAPE) {
+            glfwSetWindowShouldClose(win, GLFW_TRUE);
+        }
+        if (key == GLFW_KEY_C) {
+            rays.clear();
+        }
+        if (key == GLFW_KEY_R) {
+            // Seed a vertical bundle of rays from the left edge
+            double left   = -engine.width + engine.offsetX;
+            double bottom = -engine.height + engine.offsetY;
+            double top    =  engine.height + engine.offsetY;
+            int numRays = 61;
+            for (int i = 0; i < numRays; ++i) {
+                double t = (numRays == 1) ? 0.5 : (double)i / (double)(numRays - 1);
+                double y = bottom + t * (top - bottom);
+                rays.emplace_back(vec2(float(left + 0.05 * (2.0 * engine.width)), float(y)), vec2(c, 0.0f));
+            }
+        }
+    }
+}
+
+static void onMouseButton(GLFWwindow* win, int button, int action, int mods) {
+    if (button == GLFW_MOUSE_BUTTON_MIDDLE) {
+        if (action == GLFW_PRESS) {
+            engine.middleMousePressed = true;
+            glfwGetCursorPos(win, &engine.lastMouseX, &engine.lastMouseY);
+        } else if (action == GLFW_RELEASE) {
+            engine.middleMousePressed = false;
+        }
+    }
+
+    if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS) {
+        double mx, my;
+        glfwGetCursorPos(win, &mx, &my);
+        double left   = -engine.width + engine.offsetX;
+        double right  =  engine.width + engine.offsetX;
+        double bottom = -engine.height + engine.offsetY;
+        double top    =  engine.height + engine.offsetY;
+        double wx = left + (mx / double(engine.WIDTH)) * (right - left);
+        double wy = top  - (my / double(engine.HEIGHT)) * (top - bottom);
+        if (std::abs(wx) < 1e-6 && std::abs(wy) < 1e-6) {
+            wx = 1e-6;
+        }
+        rays.emplace_back(vec2(float(wx), float(wy)), vec2(c, 0.0f));
+    }
+}
+
+static void onCursor(GLFWwindow* win, double xpos, double ypos) {
+    if (!engine.middleMousePressed) return;
+    double dx = xpos - engine.lastMouseX;
+    double dy = ypos - engine.lastMouseY;
+    engine.lastMouseX = xpos;
+    engine.lastMouseY = ypos;
+
+    double left   = -engine.width + engine.offsetX;
+    double right  =  engine.width + engine.offsetX;
+    double bottom = -engine.height + engine.offsetY;
+    double top    =  engine.height + engine.offsetY;
+    double worldDX = (dx / double(engine.WIDTH))  * (right - left);
+    double worldDY = -(dy / double(engine.HEIGHT)) * (top - bottom);
+    engine.offsetX -= float(worldDX);
+    engine.offsetY -= float(worldDY);
+}
+
+static void onScroll(GLFWwindow* win, double xoffset, double yoffset) {
+    double factor = (yoffset > 0) ? 1.1 : 1.0 / 1.1;
+    engine.width  = float(engine.width  / factor);
+    engine.height = float(engine.height / factor);
+}
+
 void geodesicRHS(const Ray& ray, double rhs[4], double rs) {
     double r    = ray.r;
     double dr   = ray.dr;
@@ -213,7 +289,24 @@ void rk4Step(Ray& ray, double dλ, double rs) {
 
 
 int main () {
-    //rays.push_back(Ray(vec2(-1e11, 3.27606302719999999e10), vec2(c, 0.0f)));
+    // Install input callbacks now that GLFW/Engine are initialized
+    glfwSetKeyCallback(engine.window, onKey);
+    glfwSetMouseButtonCallback(engine.window, onMouseButton);
+    glfwSetCursorPosCallback(engine.window, onCursor);
+    glfwSetScrollCallback(engine.window, onScroll);
+
+    // Seed a default fan of rays so something interesting appears immediately
+    {
+        double left   = -engine.width + engine.offsetX;
+        double bottom = -engine.height + engine.offsetY;
+        double top    =  engine.height + engine.offsetY;
+        int numRays = 81;
+        for (int i = 0; i < numRays; ++i) {
+            double t = (numRays == 1) ? 0.5 : (double)i / (double)(numRays - 1);
+            double y = bottom + t * (top - bottom);
+            rays.emplace_back(vec2(float(left + 0.05 * (2.0 * engine.width)), float(y)), vec2(c, 0.0f));
+        }
+    }
     while(!glfwWindowShouldClose(engine.window)) {
         engine.run();
         SagA.draw();
